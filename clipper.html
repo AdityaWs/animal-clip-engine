@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Multi-Clip Clipper &mdash; Animal Clip Engine</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header>
+    <div class="logo">AC</div>
+    <div>
+      <h1>Multi-Clip Clipper</h1>
+      <div class="sub">program-clipper.py</div>
+    </div>
+  </header>
+
+  <main>
+    <a class="back" href="/">&larr; Kembali</a>
+
+    <form id="clipForm" enctype="multipart/form-data">
+      <section class="panel">
+        <h2>1. Video Sumber</h2>
+        <p class="desc">Upload video panjang yang akan dipotong jadi ringkasan vertical.</p>
+        <label class="drop" id="dropZone">
+          <span class="big">Klik atau tarik video ke sini</span>
+          <span class="hint">MP4, MOV, MKV, dll.</span>
+          <div class="fname" id="fname"></div>
+          <input type="file" id="video" name="video" accept="video/*">
+        </label>
+      </section>
+
+      <section class="panel">
+        <h2>2. JSON Clips <span class="badge" id="jsonBadge">belum divalidasi</span></h2>
+        <p class="desc">Tempel JSON destruktur {title, clips[]} lalu validasi dan edit langsung.</p>
+        <textarea id="json" name="json" spellcheck="false" placeholder='{"title": "...", "clips": [{"start": 0.0, "end": 7.0, "text": "..."}]}'></textarea>
+        <div class="row" style="margin-top:14px;">
+          <button type="button" class="btn-ghost" id="validateBtn">Validasi JSON</button>
+          <button type="button" class="btn-ghost" id="prettyBtn">Format Ulang</button>
+          <button type="button" class="btn-ghost" id="sampleBtn">Isi Contoh</button>
+        </div>
+        <div class="status" id="jsonStatus"></div>
+      </section>
+
+      <section class="panel">
+        <h2>3. Opsi Output</h2>
+        <div class="row">
+          <div>
+            <label for="output">Nama file output</label>
+            <input type="text" id="output" name="output" value="ringkasan.mp4" placeholder="ringkasan.mp4">
+          </div>
+        </div>
+      </section>
+
+      <button type="submit" class="btn-primary btn-block" id="submitBtn">Proses &amp; Render</button>
+    </form>
+
+    <div class="status" id="status"></div>
+    <div class="log" id="log"></div>
+    <div class="download-box" id="downloadBox" style="display:none;">
+      <a id="downloadLink" href="#">Download Video Hasil</a>
+    </div>
+  </main>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+
+    const SAMPLE = {
+      "title": "Kucing Bermain dengan Challenge Bola",
+      "caption": "",
+      "hashtags": [],
+      "clips": [
+        { "start": 0.0, "end": 5.5, "text": "Halo guys! Hari ini si anabul main bola challenge, seru banget!" },
+        { "start": 12.0, "end": 17.0, "text": "Liat tuh, dia lompat tinggi dan berhasil masukin bolanya!" }
+      ]
+    };
+
+    $("sampleBtn").addEventListener("click", () => {
+      $("json").value = JSON.stringify(SAMPLE, null, 2);
+      validateJson();
+    });
+
+    $("prettyBtn").addEventListener("click", () => {
+      try {
+        $("json").value = JSON.stringify(JSON.parse($("json").value), null, 2);
+      } catch (e) {
+        setJsonStatus("Gagal format: JSON tidak valid.", false);
+      }
+    });
+
+    function setJsonStatus(msg, ok) {
+      $("jsonStatus").textContent = msg;
+      $("jsonStatus").className = "status show " + (ok ? "done" : "error");
+      $("jsonBadge").textContent = ok ? "valid" : "error";
+      $("jsonBadge").className = "badge " + (ok ? "ok" : "err");
+      $("json").className = ok ? "ok" : "err";
+      return ok;
+    }
+
+    function validateJson() {
+      let data;
+      try {
+        data = JSON.parse($("json").value);
+      } catch (e) {
+        return setJsonStatus("JSON tidak valid: " + e.message, false);
+      }
+      if (!data || typeof data !== "object") return setJsonStatus("JSON harus berupa objek.", false);
+      if (!Array.isArray(data.clips) || data.clips.length === 0) {
+        return setJsonStatus("JSON harus punya field 'clips' berisi array non-kosong.", false);
+      }
+      for (let i = 0; i < data.clips.length; i++) {
+        const c = data.clips[i];
+        if (typeof c.start !== "number" || typeof c.end !== "number") {
+          return setJsonStatus("Clip #" + (i + 1) + " harus punya start &amp; end angka.", false);
+        }
+      }
+      return setJsonStatus("JSON valid: " + data.clips.length + " clip ditemukan.", true);
+    }
+
+    $("validateBtn").addEventListener("click", validateJson);
+    $("json").addEventListener("input", () => {
+      $("jsonBadge").textContent = "belum divalidasi";
+      $("jsonBadge").className = "badge";
+      $("json").className = "";
+      $("jsonStatus").className = "status";
+    });
+
+    const drop = $("dropZone");
+    const fileInput = $("video");
+    drop.addEventListener("click", () => fileInput.click());
+    drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("drag"); });
+    drop.addEventListener("dragleave", () => drop.classList.remove("drag"));
+    drop.addEventListener("drop", (e) => {
+      e.preventDefault();
+      drop.classList.remove("drag");
+      if (e.dataTransfer.files.length) {
+        fileInput.files = e.dataTransfer.files;
+        showFile();
+      }
+    });
+    fileInput.addEventListener("change", showFile);
+    function showFile() {
+      $("fname").textContent = fileInput.files[0] ? "File: " + fileInput.files[0].name + " (" + (fileInput.files[0].size / (1024*1024)).toFixed(1) + " MB)" : "";
+    }
+
+    const status = $("status"), log = $("log");
+    function setStatus(msg, kind) {
+      status.className = "status show " + kind;
+      status.textContent = msg;
+    }
+
+    $("clipForm").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      status.className = "status";
+      log.className = "log";
+      $("downloadBox").style.display = "none";
+
+      if (!fileInput.files.length) { return setStatus("Pilih video dulu.", "error"); }
+      if (!validateJson()) { return; }
+
+      const fd = new FormData();
+      fd.append("video", fileInput.files[0]);
+      fd.append("json", $("json").value);
+      fd.append("output", $("output").value.trim() || "ringkasan.mp4");
+
+      $("submitBtn").disabled = true;
+      setStatus("Mengupload &amp; merender... proses bisa memakan waktu beberapa menit.", "running");
+
+      try {
+        const res = await fetch("/api/clipper", { method: "POST", body: fd });
+        const blob = await res.blob();
+        if (!res.ok) {
+          let msg = "Terjadi kesalahan.";
+          try { msg = JSON.parse(await new Response(blob).text()).error || msg; } catch (_) {}
+          log.textContent = msg;
+          log.className = "log show";
+          setStatus("Proses gagal.", "error");
+          return;
+        }
+        const cd = res.headers.get("Content-Disposition") || "";
+        const m = cd.match(/filename="?([^"]+)"?/);
+        const name = m ? m[1] : "result.mp4";
+        const url = URL.createObjectURL(blob);
+        $("downloadLink").href = url;
+        $("downloadLink").download = name;
+        $("downloadBox").style.display = "block";
+        setStatus("Selesai! Video hasil siap di-download.", "done");
+      } catch (err) {
+        setStatus("Gagal terhubung ke server: " + err.message, "error");
+      } finally {
+        $("submitBtn").disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>
