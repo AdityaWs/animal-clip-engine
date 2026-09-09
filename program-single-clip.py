@@ -26,8 +26,13 @@ Contoh pakai:
         --output "single.mp4"
 
 Opsional:
-    --font /path/to/font.ttf   -> font custom untuk drawtext
+    --font /path/to/font.ttf   -> font custom untuk teks (default DynaPuff)
     --keep-temp                -> tidak menghapus folder kerja sementara (buat debug)
+
+Catatan:
+    Judul dirender ke PNG transparan via Pillow (lihat render_text.py) sehingga
+    emoji berwarna didukung (font ./fonts/NotoColorEmoji.ttf).
+    Pillow & Noto Color Emoji wajib ada.
 """
 
 import argparse
@@ -40,6 +45,8 @@ import tempfile
 import textwrap
 import uuid
 
+from render_text import render_text_block
+
 # -----------------------------
 # Konfigurasi output
 # -----------------------------
@@ -47,9 +54,14 @@ OUT_W, OUT_H = 1080, 1920      # canvas akhir (portrait 9:16)
 
 DEFAULT_FONT_CANDIDATES = ["./DynaPuff/DynaPuff-Medium.ttf"]
 
+EMOJI_FONT_PATH = "./fonts/NotoColorEmoji.ttf"
+
+TITLE_COLOR = (255, 255, 0, 255)
+TITLE_BORDER = (60, 51, 0, 255)
+
 TITLE_FONTSIZE = 64
 TITLE_WRAP_CHARS = 26
-TITLE_LINE_SPACING = -28       # rapatkan jarak antar baris
+TITLE_LINE_SPACING = -0       # rapatkan jarak antar baris
 TEXT_MARGIN = 28               # jarak teks ke tepi frame video (mode contain)
 COVER_TITLE_Y = 60             # posisi judul tetap (mode cover, di atas video)
 
@@ -127,29 +139,26 @@ def run_ffmpeg(cmd: list[str]):
     return proc
 
 
-def clean_text_for_overlay(text: str) -> str:
-    """
-    Buang emoji/karakter non-BMP yang biasanya tidak punya glyph di font default,
-    supaya drawtext tidak menampilkan kotak-kotak aneh.
-    """
-    cleaned = []
-    for ch in text:
-        cp = ord(ch)
-        if 0x1F000 <= cp <= 0x1FFFF or 0x2600 <= cp <= 0x27BF or cp == 0xFE0F:
-            continue
-        cleaned.append(ch)
-    return "".join(cleaned).strip()
-
-
 def wrap_text(text: str, width: int) -> str:
     return "\n".join(textwrap.wrap(text, width=width)) or ""
 
 
-def write_textfile(tmp_dir: str, prefix: str, text: str) -> str:
-    path = os.path.join(tmp_dir, f"{prefix}_{uuid.uuid4().hex}.txt")
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(text)
-    return path
+def write_title_png(tmp_dir: str, text: str, font_path: str) -> tuple[str, int, int]:
+    """Render judul jadi PNG transparan (mendukung emoji warna)."""
+    wrapped = wrap_text(text, TITLE_WRAP_CHARS)
+    img, w, h = render_text_block(
+        wrapped,
+        size=TITLE_FONTSIZE,
+        fill=TITLE_COLOR,
+        stroke_width=10,
+        stroke_fill=TITLE_BORDER,
+        line_spacing=TITLE_LINE_SPACING,
+        base_font_path=font_path,
+        emoji_font_path=EMOJI_FONT_PATH,
+    )
+    path = os.path.join(tmp_dir, f"title_{uuid.uuid4().hex}.png")
+    img.save(path)
+    return path, w, h
 
 
 def build_video_background(image_path: str, duration: float, output_path: str = "output.mp4", speed: float = 6.0) -> None:
@@ -196,12 +205,13 @@ def build_video_background(image_path: str, duration: float, output_path: str = 
             os.remove(grid_path)
 
 
-def build_filter_complex(mode: str, title_file: str, font_path: str, top_edge_y: float, cover_title_y: float) -> str:
+def build_filter_complex(mode: str, title_png: str, title_y: float) -> str:
     """
-    Filter chain untuk satu clip (3 input video):
+    Filter chain untuk satu clip (4 input video):
       input 0 = background video animasi (scrolling pattern)
       input 1 = source video (seluruh durasi, tanpa potongan)
       input 2 = art/video-overlay.png
+      input 3 = PNG judul (sudah termasuk emoji warna)
 
     Mode:
       - "contain" (landscape, w > h): video di-scale contain penuh (decrease),
@@ -209,29 +219,15 @@ def build_filter_complex(mode: str, title_file: str, font_path: str, top_edge_y:
       - "cover" (portrait/square, w <= h): video di-scale increase + crop memenuhi
         seluruh canvas 1080x1920, judul di-overlay di atas video pada y tetap.
     """
-    def esc(p: str) -> str:
-        return p.replace("\\", "/").replace(":", "\\:")
-
-    font_esc = esc(font_path)
-    title_esc = esc(title_file)
-
     if mode == "contain":
         video_scale = (
             f"scale={OUT_W}:{OUT_H}:force_original_aspect_ratio=decrease[vv]"
         )
-        title_y_expr = f"{top_edge_y:.2f}-text_h-{TEXT_MARGIN}"
     else:  # cover
         video_scale = (
             f"scale={OUT_W}:{OUT_H}:force_original_aspect_ratio=increase,"
             f"crop={OUT_W}:{OUT_H}[vv]"
         )
-        title_y_expr = str(cover_title_y)
-
-    common = (
-        f"fontsize={TITLE_FONTSIZE}:"
-        f"text_align=center:"
-        f"x=(w-text_w)/2"
-    )
 
     filters = [
         f"[0:v]scale={OUT_W}:{OUT_H}:force_original_aspect_ratio=increase,crop={OUT_W}:{OUT_H}[bg]",
@@ -243,14 +239,10 @@ def build_filter_complex(mode: str, title_file: str, font_path: str, top_edge_y:
         ),
         f"[bg][vv]overlay=(W-w)/2:(H-h)/2[comp]",
         (
-            f"[comp]drawtext=fontfile='{font_esc}':textfile='{title_esc}':"
-            f"bordercolor=#3C3300:borderw=10:fontcolor=#FFFF00:"
-            f"line_spacing={TITLE_LINE_SPACING}:"
-            + common
-            + f":y={title_y_expr}[img_src]"
+            f"[comp][3:v]overlay=(W-w)/2:{title_y:.2f}[comp2]"
         ),
         (
-            f"[img_src][img_overlay]"
+            f"[comp2][img_overlay]"
             f"overlay=0:0"
             f"[vout]"
         ),
@@ -275,12 +267,15 @@ def get_has_audio(video_path: str) -> bool:
 
 
 def process_single_clip(video_path: str, bg_path: str, mode: str, title_text: str, font_path: str, tmp_dir: str, top_edge_y: float, cover_title_y: float, duration: float) -> str:
-    title_clean = clean_text_for_overlay(title_text)
-    title_wrapped = wrap_text(title_clean, TITLE_WRAP_CHARS)
-    title_file = write_textfile(tmp_dir, "title", title_wrapped)
+    title_png, title_w, title_h = write_title_png(tmp_dir, title_text, font_path)
+
+    if mode == "contain":
+        title_y = top_edge_y - title_h - TEXT_MARGIN
+    else:  # cover — posisi tetap
+        title_y = cover_title_y
 
     out_path = os.path.join(tmp_dir, "single_clip.mp4")
-    filter_complex = build_filter_complex(mode, title_file, font_path, top_edge_y, cover_title_y)
+    filter_complex = build_filter_complex(mode, title_png, title_y)
 
     cmd = [
         "ffmpeg", "-y",
@@ -291,6 +286,9 @@ def process_single_clip(video_path: str, bg_path: str, mode: str, title_text: st
 
         "-loop", "1",
         "-i", VIDEO_OVERLAY_IMAGE,
+
+        "-loop", "1", "-framerate", "30",
+        "-i", title_png,
 
         "-t", str(duration),
         "-filter_complex", filter_complex,
