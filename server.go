@@ -247,8 +247,14 @@ func handleSingleClip(w http.ResponseWriter, r *http.Request) {
 	defer os.Remove(videoPath)
 
 	title := strings.TrimSpace(r.FormValue("title"))
-	if title == "" {
-		writeJSONError(w, http.StatusBadRequest, "Field 'title' kosong.")
+	jsonText := strings.TrimSpace(r.FormValue("json"))
+
+	if title == "" && jsonText == "" {
+		writeJSONError(w, http.StatusBadRequest, "Field 'title' atau 'json' harus diisi.")
+		return
+	}
+	if title != "" && jsonText != "" {
+		writeJSONError(w, http.StatusBadRequest, "Hanya boleh isi salah satu: 'title' ATAU 'json'.")
 		return
 	}
 
@@ -264,10 +270,22 @@ func handleSingleClip(w http.ResponseWriter, r *http.Request) {
 	args := []string{
 		"program-single-clip.py",
 		"--video", videoPath,
-		"--title", title,
 		"--output", outPath,
 		"--y", y,
 	}
+
+	if jsonText != "" {
+		jsonPath := filepath.Join(outputDir, fmt.Sprintf("titles_%d.json", time.Now().UnixNano()))
+		if err := os.WriteFile(jsonPath, []byte(jsonText), 0o644); err != nil {
+			writeJSONError(w, 500, "Gagal menulis JSON: "+err.Error())
+			return
+		}
+		defer os.Remove(jsonPath)
+		args = append(args, "--json", jsonPath)
+	} else {
+		args = append(args, "--title", title)
+	}
+
 	log.Printf("[SINGLE] mulai render: %s -> %s", handler.Filename, outPath)
 	combined, runErr := runPython(args)
 	log.Printf("[SINGLE] selesai (err=%v)", runErr)

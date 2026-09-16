@@ -32,9 +32,27 @@
 
       <section class="panel">
         <h2>2. Judul</h2>
-        <p class="desc">Teks judul kuning yang di-render di atas frame. Mode otomatis: landscape&rarr;contain, portrait/square&rarr;cover.</p>
-        <label for="title">Judul</label>
-        <input type="text" id="title" name="title" placeholder="Best Moments" required>
+        <p class="desc">Teks judul kuning yang di-render di atas frame. Bisa lebih dari satu dengan rentang waktu berbeda. Mode otomatis: landscape&rarr;contain, portrait/square&rarr;cover.</p>
+
+        <div id="titleRows">
+          <div class="title-row" style="display:flex;gap:8px;align-items:flex-end;margin-bottom:10px;">
+            <div style="flex:3;">
+              <label for="titleText0" style="margin-top:0;">Judul</label>
+              <input type="text" class="title-text" id="titleText0" placeholder="Best Moments" required>
+            </div>
+            <div style="flex:1;">
+              <label for="titleStart0" style="margin-top:0;">Mulai (s)</label>
+              <input type="number" class="title-start" id="titleStart0" value="0" min="0" step="0.1">
+            </div>
+            <div style="flex:1;">
+              <label for="titleEnd0" style="margin-top:0;">Selesai (s)</label>
+              <input type="number" class="title-end" id="titleEnd0" min="0" step="0.1" placeholder="sampai akhir">
+            </div>
+            <button type="button" class="btn-remove-title" style="background:none;border:none;color:var(--red);font-size:22px;cursor:pointer;padding:4px 8px;" title="Hapus">&times;</button>
+          </div>
+        </div>
+
+        <button type="button" class="btn-ghost btn-block" id="addTitleBtn" style="margin-top:8px;">+ Tambah Judul</button>
       </section>
 
       <section class="panel">
@@ -88,6 +106,50 @@
       status.textContent = msg;
     }
 
+    // --- Dynamic title rows ---
+    let titleCounter = 1;
+
+    $("addTitleBtn").addEventListener("click", () => {
+      const idx = titleCounter++;
+      const row = document.createElement("div");
+      row.className = "title-row";
+      row.style.cssText = "display:flex;gap:8px;align-items:flex-end;margin-bottom:10px;";
+      row.innerHTML =
+        '<div style="flex:3;">' +
+          '<label style="margin-top:0;">Judul</label>' +
+          '<input type="text" class="title-text" placeholder="Judul" required>' +
+        '</div>' +
+        '<div style="flex:1;">' +
+          '<label style="margin-top:0;">Mulai (s)</label>' +
+          '<input type="number" class="title-start" value="0" min="0" step="0.1">' +
+        '</div>' +
+        '<div style="flex:1;">' +
+          '<label style="margin-top:0;">Selesai (s)</label>' +
+          '<input type="number" class="title-end" min="0" step="0.1" placeholder="sampai akhir">' +
+        '</div>' +
+        '<button type="button" class="btn-remove-title" style="background:none;border:none;color:var(--red);font-size:22px;cursor:pointer;padding:4px 8px;" title="Hapus">&times;</button>';
+      $("titleRows").appendChild(row);
+      row.querySelector(".btn-remove-title").addEventListener("click", () => row.remove());
+    });
+
+    document.querySelectorAll(".btn-remove-title").forEach(btn => {
+      btn.addEventListener("click", () => btn.closest(".title-row").remove());
+    });
+
+    function getTitleEntries() {
+      const rows = document.querySelectorAll(".title-row");
+      const entries = [];
+      rows.forEach(row => {
+        const text = row.querySelector(".title-text").value.trim();
+        if (!text) return;
+        const start = parseFloat(row.querySelector(".title-start").value) || 0;
+        const endVal = row.querySelector(".title-end").value;
+        const end = endVal !== "" ? parseFloat(endVal) : 0;
+        entries.push({ text, start, end });
+      });
+      return entries;
+    }
+
     $("singleForm").addEventListener("submit", async (e) => {
       e.preventDefault();
       status.className = "status";
@@ -95,13 +157,20 @@
       $("downloadBox").style.display = "none";
 
       if (!fileInput.files.length) { return setStatus("Pilih video dulu.", "error"); }
-      if (!$("title").value.trim()) { return setStatus("Isi judul dulu.", "error"); }
+
+      const entries = getTitleEntries();
+      if (!entries.length) { return setStatus("Isi minimal satu judul.", "error"); }
 
       const fd = new FormData();
       fd.append("video", fileInput.files[0]);
-      fd.append("title", $("title").value.trim());
       fd.append("output", $("output").value.trim() || "single.mp4");
       fd.append("y", $("y").value || "60");
+
+      if (entries.length === 1 && entries[0].end === 0) {
+        fd.append("title", entries[0].text);
+      } else {
+        fd.append("json", JSON.stringify({ titles: entries }));
+      }
 
       $("submitBtn").disabled = true;
       setStatus("Mengupload &amp; merender... proses bisa memakan waktu beberapa menit.", "running");

@@ -9,8 +9,8 @@ gaya sama seperti program-clipper.py:
   - art/video-overlay.png di-composite di atas frame (menutup seluruh canvas)
 
 Perbedaan utama dari clipper:
-  - Tidak pakai JSON / clips. Hanya menerima --video dan --title.
   - Seluruh durasi video dipakai (tanpa potongan).
+  - Mendukung multi-title dengan rentang waktu berbeda via JSON.
   - Mode penyesuaian video bersifat dinamis berdasarkan aspect ratio sumber:
       * Landscape  (lebar > tinggi)  -> CONTAIN : seluruh video masuk ke canvas,
         sisi kosong diisi latar animasi, judul di atas frame video.
@@ -19,11 +19,26 @@ Perbedaan utama dari clipper:
 
 Requirement: ffmpeg & ffprobe harus terinstall dan ada di PATH.
 
-Contoh pakai:
+Contoh pakai (single title):
     python program-single-clip.py \
         --video "Ballpool.mp4" \
         --title "Best Moments" \
         --output "single.mp4"
+
+Contoh pakai (multi title via JSON):
+    python program-single-clip.py \
+        --video "Ballpool.mp4" \
+        --json "titles.json" \
+        --output "single.mp4"
+
+Format JSON:
+    {
+      "titles": [
+        {"text": "Title 1", "start": 0, "end": 10},
+        {"text": "Title 2", "start": 10, "end": 20}
+      ]
+    }
+    Field "end" bersifat opsional; jika tidak diisi atau 0, menggunakan durasi video.
 
 Opsional:
     --font /path/to/font.ttf   -> font custom untuk teks (default DynaPuff)
@@ -46,6 +61,13 @@ import textwrap
 import uuid
 
 from render_text import render_text_block
+
+# Windows: paksa stdout & stderr jadi UTF-8 + errors=replace supaya print() yang
+# memuat emoji / karakter Unicode (mis. judul "Best 🤔") tidak memicu
+# UnicodeEncodeError (console Windows default pakai codepage cp1252).
+for _stream in (sys.stdout, sys.stderr):
+    if _stream and hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
 
 # -----------------------------
 # Konfigurasi output
@@ -205,19 +227,22 @@ def build_video_background(image_path: str, duration: float, output_path: str = 
             os.remove(grid_path)
 
 
-def build_filter_complex(mode: str, title_png: str, title_y: float) -> str:
+def build_filter_complex(mode: str, title_entries: list[dict], title_y: float) -> str:
     """
-    Filter chain untuk satu clip (4 input video):
+    Filter chain untuk satu clip (input dinamis):
       input 0 = background video animasi (scrolling pattern)
       input 1 = source video (seluruh durasi, tanpa potongan)
       input 2 = art/video-overlay.png
-      input 3 = PNG judul (sudah termasuk emoji warna)
+      input 3..N = PNG judul (satu per title, sudah termasuk emoji warna)
 
     Mode:
       - "contain" (landscape, w > h): video di-scale contain penuh (decrease),
         di tengah, judul menempel tepat di atas tepi atas video.
       - "cover" (portrait/square, w <= h): video di-scale increase + crop memenuhi
         seluruh canvas 1080x1920, judul di-overlay di atas video pada y tetap.
+
+    Multi-title: setiap judul dirender hanya pada rentang waktu [start, end]
+    via --enable 'between(t,start,end)' pada filter overlay-nya.
     """
     if mode == "contain":
         video_scale = (
@@ -238,15 +263,25 @@ def build_filter_complex(mode: str, title_png: str, title_y: float) -> str:
             f"[img_overlay]"
         ),
         f"[bg][vv]overlay=(W-w)/2:(H-h)/2[comp]",
-        (
-            f"[comp][3:v]overlay=(W-w)/2:{title_y:.2f}[comp2]"
-        ),
-        (
-            f"[comp2][img_overlay]"
-            f"overlay=0:0"
-            f"[vout]"
-        ),
     ]
+
+    current = "comp"
+    for i, entry in enumerate(title_entries):
+        start = entry["start"]
+        end = entry["end"]
+        png_label = f"{3 + i}:v"
+        next_label = f"comp{i + 1}" if i < len(title_entries) - 1 else "comp_final"
+        enable = f":enable='between(t,{start:.3f},{end:.3f})'"
+        filters.append(
+            f"[{current}][{png_label}]overlay=(W-w)/2:{title_y:.2f}{enable}[{next_label}]"
+        )
+        current = next_label
+
+    filters.append(
+        f"[{current}][img_overlay]"
+        f"overlay=0:0"
+        f"[vout]"
+    )
     return ";".join(filters)
 
 
@@ -266,16 +301,25 @@ def get_has_audio(video_path: str) -> bool:
     return bool(info.get("streams"))
 
 
-def process_single_clip(video_path: str, bg_path: str, mode: str, title_text: str, font_path: str, tmp_dir: str, top_edge_y: float, cover_title_y: float, duration: float) -> str:
-    title_png, title_w, title_h = write_title_png(tmp_dir, title_text, font_path)
+def process_single_clip(video_path: str, bg_path: str, mode: str, title_entries: list[dict], font_path: str, tmp_dir: str, top_edge_y: float, cover_title_y: float, duration: float) -> str:
+    title_pngs = []
+    max_title_h = 0
+    for i, entry in enumerate(title_entries):
+        text = entry["text"]
+        title_png, title_w, title_h = write_title_png(tmp_dir, text, font_path)
+        start = entry["start"]
+        end = entry["end"]
+        title_pngs.append({"png": title_png, "start": start, "end": end})
+        max_title_h = max(max_title_h, title_h)
+        print(f"[INFO] Judul #{i + 1}: \"{text}\" ({start:.2f}s - {end:.2f}s, PNG {title_w}x{title_h})")
 
     if mode == "contain":
-        title_y = top_edge_y - title_h - TEXT_MARGIN
+        title_y = top_edge_y - max_title_h - TEXT_MARGIN
     else:  # cover — posisi tetap
         title_y = cover_title_y
 
     out_path = os.path.join(tmp_dir, "single_clip.mp4")
-    filter_complex = build_filter_complex(mode, title_png, title_y)
+    filter_complex = build_filter_complex(mode, title_pngs, title_y)
 
     cmd = [
         "ffmpeg", "-y",
@@ -286,10 +330,15 @@ def process_single_clip(video_path: str, bg_path: str, mode: str, title_text: st
 
         "-loop", "1",
         "-i", VIDEO_OVERLAY_IMAGE,
+    ]
 
-        "-loop", "1", "-framerate", "30",
-        "-i", title_png,
+    for entry in title_pngs:
+        cmd += [
+            "-loop", "1", "-framerate", "30",
+            "-i", entry["png"],
+        ]
 
+    cmd += [
         "-t", str(duration),
         "-filter_complex", filter_complex,
         "-map", "[vout]",
@@ -307,20 +356,65 @@ def process_single_clip(video_path: str, bg_path: str, mode: str, title_text: st
 
     cmd += [out_path]
 
-    print(f"[INFO] Memproses video (mode={mode}) -> {out_path}")
+    print(f"[INFO] Memproses video (mode={mode}, {len(title_entries)} judul) -> {out_path}")
     run_ffmpeg(cmd)
     return out_path
+
+
+def load_title_entries(args, duration: float) -> list[dict]:
+    """
+    Bangun list entry judul dari --title (single) atau --json (multi).
+    Entri berupa {"text", "start", "end"} dengan rentang sudah di-clamp ke durasi.
+    """
+    entries: list[dict] = []
+
+    if args.json:
+        if not os.path.isfile(args.json):
+            sys.exit(f"[ERROR] JSON tidak ditemukan: {args.json}")
+        with open(args.json, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        titles = data.get("titles", [])
+        if not titles:
+            sys.exit("[ERROR] JSON tidak punya field 'titles' atau kosong.")
+        for i, item in enumerate(titles):
+            text = str(item.get("text", "")).strip()
+            if not text:
+                sys.exit(f"[ERROR] Judul #{i + 1} di JSON punya 'text' kosong.")
+            try:
+                start = float(item.get("start", 0))
+            except (TypeError, ValueError):
+                sys.exit(f"[ERROR] Judul #{i + 1} punya 'start' tidak valid.")
+            try:
+                end = item.get("end", 0)
+                end = float(end) if end else 0.0
+            except (TypeError, ValueError):
+                sys.exit(f"[ERROR] Judul #{i + 1} punya 'end' tidak valid.")
+            if start < 0:
+                start = 0.0
+            if end <= 0 or end > duration:
+                end = duration
+            entries.append({"text": text, "start": start, "end": end})
+    else:
+        entries.append({"text": args.title, "start": 0.0, "end": duration})
+
+    return entries
 
 
 def main():
     parser = argparse.ArgumentParser(description="Render satu video pendek 1080x1920 dengan judul (single clip).")
     parser.add_argument("--video", required=True, help="Path video sumber.")
-    parser.add_argument("--title", required=True, help="Judul yang dirender di atas/bawah frame.")
+    parser.add_argument("--title", default=None, help="Judul yang dirender di atas/bawah frame (single, seluruh durasi).")
+    parser.add_argument("--json", default=None, help="Path file JSON berisi judul multi dengan rentang waktu.")
     parser.add_argument("--output", default="output_single.mp4", help="Path file output final.")
     parser.add_argument("--font", default=None, help="Path font .ttf custom untuk teks.")
     parser.add_argument("--y", type=float, default=COVER_TITLE_Y, help="Koordinat Y judul untuk mode portrait/cover (default 60).")
     parser.add_argument("--keep-temp", action="store_true", help="Simpan folder temp (untuk debug).")
     args = parser.parse_args()
+
+    if not args.title and not args.json:
+        sys.exit("[ERROR] Wajib isi salah satu: --title 'teks' atau --json path/to/titles.json")
+    if args.title and args.json:
+        sys.exit("[ERROR] Hanya boleh isi salah satu: --title ATAU --json, tidak keduanya.")
 
     if not os.path.isfile(args.video):
         sys.exit(f"[ERROR] Video tidak ditemukan: {args.video}")
@@ -338,11 +432,14 @@ def main():
     else:
         mode = "cover"
 
+    title_entries = load_title_entries(args, duration)
+
     top_edge_y = compute_top_edge(src_w, src_h) if mode == "contain" else 0.0
     print(
         f"[INFO] Video sumber {src_w}x{src_h} ({duration:.2f}s) -> mode={mode} "
         f"(landscape=contain, portrait/square=cover)"
     )
+    print(f"[INFO] Jumlah judul: {len(title_entries)}")
 
     tmp_dir = tempfile.mkdtemp(prefix="single_clip_")
     print(f"[INFO] Folder kerja sementara: {tmp_dir}")
@@ -352,7 +449,7 @@ def main():
         build_video_background(VIDEO_BACKGROUND_PATTERN, duration, bg_path)
 
         out_path = process_single_clip(
-            args.video, bg_path, mode, args.title, font_path, tmp_dir, top_edge_y, args.y, duration,
+            args.video, bg_path, mode, title_entries, font_path, tmp_dir, top_edge_y, args.y, duration,
         )
 
         shutil.move(out_path, args.output)
