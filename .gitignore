@@ -1,5 +1,4 @@
 __pycache__/
-art/*
 json/*
 output/*
 videos/*
@@ -7,3 +6,7 @@ transcription/*
 server.exe
 .../
 .opencode/
+
+*.kra
+*.kra~
+*.png~
